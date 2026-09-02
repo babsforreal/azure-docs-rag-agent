@@ -1,29 +1,44 @@
-﻿using HtmlAgilityPack;
+﻿using System.Text.Json;
 
-var sources = new (string Cert, string Url)[]
+var targetCerts = new[]
 {
-    ("AZ-900", "https://learn.microsoft.com/en-us/credentials/certifications/azure-fundamentals/"),
-    ("SC-900", "https://learn.microsoft.com/en-us/credentials/certifications/security-compliance-and-identity-fundamentals/"),
-    ("AZ-104", "https://learn.microsoft.com/en-us/credentials/certifications/azure-administrator/"),
-    ("AZ-204", "https://learn.microsoft.com/en-us/credentials/certifications/azure-developer/"),
-    ("AZ-305", "https://learn.microsoft.com/en-us/credentials/certifications/azure-solutions-architect/"),
-    ("AZ-400", "https://learn.microsoft.com/en-us/credentials/certifications/devops-engineer/"),
+    "certification.azure-fundamentals",
+    "certification.security-compliance-and-identity-fundamentals",
+    "certification.azure-administrator",
+    "certification.azure-developer",
+    "certification.azure-solutions-architect",
+    "certification.devops-engineer",
 };
 
 using var http = new HttpClient();
-http.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (compatible; AzureDocsRagAgent/1.0)");
+var stream = await http.GetStreamAsync("https://learn.microsoft.com/api/catalog/");
+using var doc = await JsonDocument.ParseAsync(stream);
 
-foreach (var (cert, url) in sources)
+var certifs = doc.RootElement.GetProperty("certifications")
+    .EnumerateArray()
+    .Where(c => targetCerts.Contains(c.GetProperty("uid").GetString()))
+    .ToList();
+
+// index par uid les learning paths, pour les récupérer vite quand une certification en référence
+var pathsByUid = doc.RootElement.GetProperty("learningPaths")
+    .EnumerateArray()
+    .ToDictionary(p => p.GetProperty("uid").GetString()!, p => p);
+
+foreach (var certif in certifs)
 {
-    var html = await http.GetStringAsync(url);
+    var title = certif.GetProperty("title").GetString();
+    var pathUids = certif.GetProperty("study_guide")
+        .EnumerateArray()
+        .Select(sg => sg.GetProperty("uid").GetString()!)
+        .ToList();
 
-    var doc = new HtmlDocument();
-    doc.LoadHtml(html);
+    Console.WriteLine($"{title}: {pathUids.Count} learning paths");
 
-    // le contenu réel de la page vit dans <main>, le reste c'est nav/footer
-    var text = doc.DocumentNode.SelectSingleNode("//main")?.InnerText ?? "";
-    text = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ").Trim();
-
-    Console.WriteLine($"{cert}: {text.Length} chars");
-    // TODO: chunking + embeddings + push vers AI Search
+    foreach (var uid in pathUids)
+    {
+        if (!pathsByUid.TryGetValue(uid, out var path)) continue;
+        var pathTitle = path.GetProperty("title").GetString();
+        var summary = path.GetProperty("summary").GetString();
+        Console.WriteLine($"  - {pathTitle}: {summary}");
+    }
 }
