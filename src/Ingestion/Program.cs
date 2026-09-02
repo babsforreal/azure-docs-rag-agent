@@ -1,44 +1,72 @@
 ﻿using System.Text.Json;
+using HtmlAgilityPack;
 
-var targetCerts = new[]
+var certs = new[]
 {
-    "certification.azure-fundamentals",
-    "certification.security-compliance-and-identity-fundamentals",
-    "certification.azure-administrator",
-    "certification.azure-developer",
-    "certification.azure-solutions-architect",
-    "certification.devops-engineer",
+    new CertSource("certification.azure-fundamentals", "AZ-900", "https://learn.microsoft.com/en-us/credentials/certifications/azure-fundamentals/"),
+    new CertSource("certification.security-compliance-and-identity-fundamentals", "SC-900", "https://learn.microsoft.com/en-us/credentials/certifications/security-compliance-and-identity-fundamentals/"),
+    new CertSource("certification.azure-administrator", "AZ-104", "https://learn.microsoft.com/en-us/credentials/certifications/azure-administrator/"),
+    new CertSource("certification.azure-developer", "AZ-204", "https://learn.microsoft.com/en-us/credentials/certifications/azure-developer/"),
+    new CertSource("certification.azure-solutions-architect", "AZ-305", "https://learn.microsoft.com/en-us/credentials/certifications/azure-solutions-architect/"),
+    new CertSource("certification.devops-engineer", "AZ-400", "https://learn.microsoft.com/en-us/credentials/certifications/devops-engineer/"),
 };
 
 using var http = new HttpClient();
-var stream = await http.GetStreamAsync("https://learn.microsoft.com/api/catalog/");
-using var doc = await JsonDocument.ParseAsync(stream);
+http.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (compatible; AzureDocsRagAgent/1.0)");
+var pageTexts = new Dictionary<string, string>();
+foreach (var cert in certs)
+{
+    var html = await http.GetStringAsync(cert.Url);
+    var doc = new HtmlDocument();
+    doc.LoadHtml(html);
 
-var certifs = doc.RootElement.GetProperty("certifications")
-    .EnumerateArray()
-    .Where(c => targetCerts.Contains(c.GetProperty("uid").GetString()))
-    .ToList();
+    var text = doc.DocumentNode.SelectSingleNode("//main")?.InnerText ?? "";
+    pageTexts[cert.Uid] = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ").Trim();
+}
 
-// index par uid les learning paths, pour les récupérer vite quand une certification en référence
-var pathsByUid = doc.RootElement.GetProperty("learningPaths")
+JsonDocument catalog;
+try
+{
+    var stream = await http.GetStreamAsync("https://learn.microsoft.com/api/catalog/");
+    catalog = await JsonDocument.ParseAsync(stream);
+}
+catch (HttpRequestException ex)
+{
+    Console.WriteLine($"Catalog API indisponible ({ex.Message}), on continue sans les learning paths");
+    catalog = JsonDocument.Parse("{\"certifications\":[],\"learningPaths\":[]}");
+}
+
+var pathsByUid = catalog.RootElement.GetProperty("learningPaths")
     .EnumerateArray()
     .ToDictionary(p => p.GetProperty("uid").GetString()!, p => p);
 
-foreach (var certif in certifs)
+var certsByUid = catalog.RootElement.GetProperty("certifications")
+    .EnumerateArray()
+    .ToDictionary(c => c.GetProperty("uid").GetString()!, c => c);
+
+var contents = new List<CertContent>();
+
+foreach (var cert in certs)
 {
-    var title = certif.GetProperty("title").GetString();
-    var pathUids = certif.GetProperty("study_guide")
-        .EnumerateArray()
-        .Select(sg => sg.GetProperty("uid").GetString()!)
-        .ToList();
+    var text = pageTexts[cert.Uid];
 
-    Console.WriteLine($"{title}: {pathUids.Count} learning paths");
-
-    foreach (var uid in pathUids)
+    if (certsByUid.TryGetValue(cert.Uid, out var catalogCert))
     {
-        if (!pathsByUid.TryGetValue(uid, out var path)) continue;
-        var pathTitle = path.GetProperty("title").GetString();
-        var summary = path.GetProperty("summary").GetString();
-        Console.WriteLine($"  - {pathTitle}: {summary}");
+        var pathSummaries = catalogCert.GetProperty("study_guide")
+            .EnumerateArray()
+            .Select(sg => sg.GetProperty("uid").GetString()!)
+            .Where(pathsByUid.ContainsKey)
+            .Select(uid => pathsByUid[uid])
+            .Select(p => $"{p.GetProperty("title").GetString()}: {p.GetProperty("summary").GetString()}");
+
+        text += " " + string.Join(" ", pathSummaries);
     }
+
+    contents.Add(new CertContent(cert.Title, text));
 }
+
+foreach (var c in contents)
+    Console.WriteLine($"{c.Title}: {c.Text.Length} chars");
+
+record CertSource(string Uid, string Title, string Url);
+record CertContent(string Title, string Text);
